@@ -74,13 +74,14 @@
   /* ---------- location sheet ---------- */
   .sheet-bg{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:flex-end;justify-content:center;z-index:10}
   .sheet-bg.on{display:flex}
-  .sheet{width:min(480px,100%);background:#111114;border:1px solid var(--ui-line);border-bottom:0;border-radius:18px 18px 0 0;
+  .sheet{max-height:92dvh;overflow-y:auto;-webkit-overflow-scrolling:touch;width:min(480px,100%);background:#111114;border:1px solid var(--ui-line);border-bottom:0;border-radius:18px 18px 0 0;
     padding:20px 20px calc(20px + env(safe-area-inset-bottom))}
   .sheet h2{font-size:15px;letter-spacing:1px;margin-bottom:4px;color:#fff}
   .sheet p{color:var(--ui);margin-bottom:16px}
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0}
   .grid .btn{justify-content:center;border-radius:10px;padding:12px}
   .grid .btn.sel{border-color:#fff}
+  .region{grid-column:1/-1;color:var(--ui);letter-spacing:1px;text-transform:uppercase;font-size:11px;margin-top:6px}
   .wide{width:100%;justify-content:center;border-radius:10px;padding:13px}
   .primary{background:#fff;color:#000;border-color:#fff}
   .primary:active{background:#ddd}
@@ -163,6 +164,10 @@ const AIRLINES = {
   UAL:"United",AAL:"American",DAL:"Delta",ACA:"Air Canada",HAL:"Hawaiian",
   BAW:"British",DLH:"Lufthansa",AFR:"Air France",KLM:"KLM",FIN:"Finnair",TAM:"LATAM",
   LAN:"LATAM",TKJ:"Turkish",THY:"Turkish",SAA:"South African",
+  JTA:"Japan Transocean",SKY:"Skymark",APJ:"Peach",JJP:"Jetstar Japan",ADO:"Air Do",
+  SFJ:"StarFlyer",SNJ:"Solaseed Air",NCA:"Nippon Cargo",IBX:"IBEX Airlines",FDA:"Fuji Dream",
+  JAC:"Japan Air Comm",JLJ:"J-Air",AKX:"ANA Wings",TZP:"ZIPAIR",SJO:"Spring Japan",
+  NTH:"Hokkaido Air",ORC:"Oriental Air",RAC:"Ryukyu Air",
   FDX:"FedEx",UPS:"UPS",GTI:"Atlas Air",CLX:"Cargolux",DHL:"DHL",BCS:"DHL",
   SWA:"Southwest",JBU:"JetBlue",ASA:"Alaska",EZY:"easyJet",RYR:"Ryanair",
 };
@@ -172,7 +177,7 @@ const TYPES = {
   B38M:"737 MAX 8",B39M:"737 MAX 9",B3XM:"737 MAX 10",B737:"737-700",B738:"737-800",B739:"737-900",
   B712:"717-200",B744:"747-400",B748:"747-8",B752:"757-200",B763:"767-300",B764:"767-400",
   B772:"777-200",B77L:"777-200LR",B77W:"777-300ER",B773:"777-300",B778:"777-8",B779:"777-9",
-  B788:"787-8",B789:"787-9",B78X:"787-10",
+  B788:"787-8",B789:"787-9",B78X:"787-10",B762:"767-200",
   A20N:"A320neo",A21N:"A321neo",A320:"A320",A321:"A321",A319:"A319",A318:"A318",
   A332:"A330-200",A333:"A330-300",A338:"A330-800",A339:"A330-900",A343:"A340-300",A346:"A340-600",
   A359:"A350-900",A35K:"A350-1000",A388:"A380",BCS1:"A220-100",BCS3:"A220-300",
@@ -189,10 +194,15 @@ const TYPES = {
 
 /* ---------- cities ---------- */
 const CITIES = [
-  {name:"Sydney",lat:-33.8688,lon:151.2093},{name:"Melbourne",lat:-37.8136,lon:144.9631},
-  {name:"Brisbane",lat:-27.4698,lon:153.0251},{name:"Perth",lat:-31.9523,lon:115.8613},
-  {name:"Adelaide",lat:-34.9285,lon:138.6007},{name:"Gold Coast",lat:-28.0167,lon:153.4000},
-  {name:"Canberra",lat:-35.2809,lon:149.1300},{name:"Auckland",lat:-36.8485,lon:174.7633},
+  {region:"Australia & NZ",name:"Sydney",lat:-33.8688,lon:151.2093},{region:"Australia & NZ",name:"Melbourne",lat:-37.8136,lon:144.9631},
+  {region:"Australia & NZ",name:"Brisbane",lat:-27.4698,lon:153.0251},{region:"Australia & NZ",name:"Perth",lat:-31.9523,lon:115.8613},
+  {region:"Australia & NZ",name:"Adelaide",lat:-34.9285,lon:138.6007},{region:"Australia & NZ",name:"Gold Coast",lat:-28.0167,lon:153.4000},
+  {region:"Australia & NZ",name:"Canberra",lat:-35.2809,lon:149.1300},{region:"Australia & NZ",name:"Auckland",lat:-36.8485,lon:174.7633},
+  // Japan: centred on the main airports, where the traffic is
+  {region:"Japan",name:"Tokyo Haneda",lat:35.5494,lon:139.7798},{region:"Japan",name:"Tokyo Narita",lat:35.7720,lon:140.3929},
+  {region:"Japan",name:"Osaka Kansai",lat:34.4320,lon:135.2304},{region:"Japan",name:"Osaka Itami",lat:34.7855,lon:135.4382},
+  {region:"Japan",name:"Nagoya",lat:34.8584,lon:136.8054},{region:"Japan",name:"Fukuoka",lat:33.5859,lon:130.4510},
+  {region:"Japan",name:"Sapporo",lat:42.7752,lon:141.6923},{region:"Japan",name:"Okinawa Naha",lat:26.1958,lon:127.6459},
 ];
 const RANGES = [10,20,40,80]; // km
 
@@ -640,7 +650,12 @@ $("sheet").onclick=e=>{if(e.target===$("sheet"))$("sheet").classList.remove("on"
 
 function buildSheet(){
   const g=$("cityGrid");g.innerHTML="";
+  let region="";
   CITIES.forEach(c=>{
+    if(c.region!==region){
+      region=c.region;
+      const h=document.createElement("div");h.className="region";h.textContent=region;g.appendChild(h);
+    }
     const b=document.createElement("button");b.className="btn"+(c.name===loc.name?" sel":"");b.textContent=c.name;
     b.onclick=()=>setLoc(c);g.appendChild(b);
   });
