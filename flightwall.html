@@ -44,6 +44,13 @@
   #glow{filter:blur(var(--glow,6px)) saturate(1.3);opacity:.85;mix-blend-mode:screen}
   #lit{mix-blend-mode:screen}
   #radar{display:none;cursor:pointer}
+  .cmp{display:none;position:absolute;top:2.2%;left:1.4%;z-index:3;align-items:center;gap:6px;
+    background:rgba(0,0,0,.6);border:1px solid rgba(61,220,132,.35);color:#bfeccf;border-radius:999px;
+    font:600 clamp(11px,1.3vw,14px)/1 ui-monospace,Menlo,monospace;letter-spacing:.5px;padding:8px 12px;cursor:pointer}
+  .cmp.live{border-color:#ff5a4f;color:#fff}
+  .cmp.locked{border-color:#ffb021;color:#ffd58a}
+  .cmp:focus-visible{outline:2px solid #fff;outline-offset:2px}
+  .wall.radar .cmp{display:inline-flex}
   .wall.radar #radar{display:block}
   .wall.radar #bg,.wall.radar #glow,.wall.radar #lit{display:none}
   .seg{display:inline-flex;background:#111114;border:1px solid var(--ui-line);border-radius:999px;padding:3px}
@@ -107,6 +114,7 @@
     <canvas id="glow"></canvas>
     <canvas id="lit"></canvas>
     <canvas id="radar"></canvas>
+    <button class="cmp" id="cmpBtn" aria-label="Compass mode"><span id="cmpIcon">N↑</span> <span id="cmpText">North up</span></button>
   </div>
 </div>
 
@@ -684,11 +692,21 @@ function drawRadar(now){
   for(let i=1;i<=3;i++){xR.beginPath();xR.arc(cx,cy,R*i/3,0,6.283);xR.stroke();}
   xR.beginPath();xR.moveTo(cx-R,cy);xR.lineTo(cx+R,cy);xR.moveTo(cx,cy-R);xR.lineTo(cx,cy+R);xR.stroke();
   // ticks every 10 degrees
-  for(let a=0;a<360;a+=10){const r1=R*(a%30?0.975:0.95),t=toRad(a-90);
+  const HD=radarHeading();
+  for(let a=0;a<360;a+=10){const r1=R*(a%30?0.975:0.95),t=toRad(a-HD-90);
     xR.beginPath();xR.moveTo(cx+Math.cos(t)*r1,cy+Math.sin(t)*r1);xR.lineTo(cx+Math.cos(t)*R,cy+Math.sin(t)*R);xR.stroke();}
   xR.font=`600 ${u*3}px ui-monospace,Menlo,monospace`;xR.textAlign="center";xR.textBaseline="middle";
   xR.fillStyle=rgba(RG,.7);
-  [["N",0],["E",90],["S",180],["W",270]].forEach(([s,a])=>{const t=toRad(a-90);xR.fillText(s,cx+Math.cos(t)*(R+u*3.2),cy+Math.sin(t)*(R+u*3.2));});
+  [["N",0],["E",90],["S",180],["W",270]].forEach(([s,a])=>{const t=toRad(a-HD-90);
+    xR.fillStyle = s==="N" ? "#ff5a4f" : rgba(RG,.7);
+    xR.fillText(s,cx+Math.cos(t)*(R+u*3.2),cy+Math.sin(t)*(R+u*3.2));});
+  if(cmpMode!=="off"){
+    // "ahead" marker at the top: the way the iPad is facing
+    xR.fillStyle="#fff";xR.beginPath();xR.moveTo(cx,cy-R+u*0.6);xR.lineTo(cx-u*1.4,cy-R+u*3);xR.lineTo(cx+u*1.4,cy-R+u*3);xR.closePath();xR.fill();
+    // north needle on the rim
+    const nt=toRad(-HD-90);xR.strokeStyle="#ff5a4f";xR.lineWidth=u*.5;
+    xR.beginPath();xR.moveTo(cx+Math.cos(nt)*R*0.9,cy+Math.sin(nt)*R*0.9);xR.lineTo(cx+Math.cos(nt)*R,cy+Math.sin(nt)*R);xR.stroke();
+  }
   xR.textAlign="left";xR.fillStyle=rgba(RG,.45);xR.font=`500 ${u*2.4}px ui-monospace,Menlo,monospace`;
   for(let i=1;i<=3;i++) xR.fillText(Math.round(rangeKm*i/3)+"km",cx+u*.8,cy-R*i/3+u*1.8);
 
@@ -703,7 +721,7 @@ function drawRadar(now){
 
   // blips
   blipHits=[];
-  const toXY=(d,b)=>{const r=Math.min(d/rangeKm,1.04)*R,t=toRad(b-90);return [cx+Math.cos(t)*r,cy+Math.sin(t)*r];};
+  const toXY=(d,b)=>{const r=Math.min(d/rangeKm,1.04)*R,t=toRad(b-HD-90);return [cx+Math.cos(t)*r,cy+Math.sin(t)*r];};
   flights.forEach(f=>{
     const p=nowPos(f); if(p.d>rangeKm*1.05) return;
     const [x,y]=toXY(p.d,p.b), sel=f.hex===curHex, col=sel?SEL:RG;
@@ -713,7 +731,7 @@ function drawRadar(now){
     tr.forEach((q,i)=>{const [tx,ty]=toXY(dist(loc.lat,loc.lon,q[0],q[1]),bearing(loc.lat,loc.lon,q[0],q[1]));
       xR.fillStyle=rgba(col,.12+.25*i/tr.length);xR.beginPath();xR.arc(tx,ty,u*.45,0,6.283);xR.fill();});
     // plane arrow along track
-    xR.save();xR.translate(x,y);xR.rotate(toRad(f.track||0));
+    xR.save();xR.translate(x,y);xR.rotate(toRad((f.track||0)-HD));
     xR.shadowColor=rgba(col,1);xR.shadowBlur=u*2*glow;xR.fillStyle=rgba(col,glow);
     const s=u*(sel?1.9:1.4);
     xR.beginPath();xR.moveTo(0,-s*1.4);xR.lineTo(s,s);xR.lineTo(0,s*.45);xR.lineTo(-s,s);xR.closePath();xR.fill();
@@ -753,7 +771,8 @@ function drawRadar(now){
   xR.font=`600 ${u*3.4}px ui-monospace,Menlo,monospace`;xR.fillStyle=rgba(SEL,1);xR.fillText(f.cs||f.reg,tx,y+u*10);
   xR.font=`500 ${u*2.8}px ui-monospace,Menlo,monospace`;xR.fillStyle="#9aa";xR.fillText(f.typeName||"",tx,y+u*14);
   y+=ls+u*8;
-  if(rt){xR.font=`700 ${u*7}px ui-monospace,Menlo,monospace`;xR.fillStyle="#fff";xR.fillText(`${rt.from} → ${rt.to}`,px0,y);y+=u*8;}
+  if(rt){xR.font=`700 ${u*7}px ui-monospace,Menlo,monospace`;xR.fillStyle="#fff";xR.fillText(`${rt.from} → ${rt.to}`,px0,y);y+=u*6.5;}
+  xR.font=`600 ${u*3.2}px ui-monospace,Menlo,monospace`;xR.fillStyle=rgba(SEL,1);xR.fillText(lookText(p,f),px0,y);y+=u*7;
   const stats=[["Altitude",fmtAlt(f.alt)],["Speed",fmtSpd(f.gs)],["Distance",p.d.toFixed(1)+"km "+COMPASS[Math.round(p.b/45)%8]],["Heading",(f.track!=null?Math.round(f.track):"--")+"°"]];
   const cw=pw/2;
   stats.forEach((s,i)=>{const sx=px0+(i%2)*cw, sy=y+Math.floor(i/2)*u*11;
@@ -774,6 +793,85 @@ function radarLoop(now){
   drawRadar(now);
   radarRAF=requestAnimationFrame(radarLoop);
 }
+/* ---------- compass: turn the radar to the way the iPad faces ----------
+   Modes: off (north up) -> live (follows the iPad's compass) -> locked (keeps
+   the last direction; good for an iPad on a stand). */
+let cmpMode = store.get("cmpMode","off");
+let lockedHeading = store.get("cmpLock", 0);
+let liveHeading = null, hx=0, hy=0, cmpAcc=null, sensorOn=false;
+function screenAngle(){
+  const a = (screen.orientation && typeof screen.orientation.angle==="number") ? screen.orientation.angle
+          : (typeof window.orientation==="number" ? window.orientation : 0);
+  return a;
+}
+function onOrient(e){
+  let h=null;
+  if(typeof e.webkitCompassHeading==="number" && e.webkitCompassHeading>=0){ h=e.webkitCompassHeading; cmpAcc=e.webkitCompassAccuracy; }
+  else if(e.absolute && typeof e.alpha==="number"){ h=(360-e.alpha)%360; }
+  if(h==null) return;
+  h=(h+screenAngle()+360)%360;                     // the direction the top of the screen points
+  // smooth: average on the circle so 359 -> 1 doesn't spin
+  const k=liveHeading==null?1:0.15;
+  hx=hx*(1-k)+Math.cos(toRad(h))*k; hy=hy*(1-k)+Math.sin(toRad(h))*k;
+  liveHeading=(Math.atan2(hy,hx)*180/Math.PI+360)%360;
+  if(cmpMode==="live") syncCmp();
+}
+function startSensor(){
+  if(sensorOn) return Promise.resolve(true);
+  const attach=()=>{
+    addEventListener("deviceorientationabsolute",onOrient,true);
+    addEventListener("deviceorientation",onOrient,true);
+    sensorOn=true; return true;
+  };
+  if(typeof DeviceOrientationEvent!=="undefined" && typeof DeviceOrientationEvent.requestPermission==="function"){
+    // iOS: must be asked from a tap
+    return DeviceOrientationEvent.requestPermission().then(s=>s==="granted"?attach():false).catch(()=>false);
+  }
+  return Promise.resolve(typeof DeviceOrientationEvent!=="undefined" ? attach() : false);
+}
+function radarHeading(){
+  if(cmpMode==="live") return liveHeading??0;
+  if(cmpMode==="locked") return lockedHeading;
+  return 0;
+}
+function syncCmp(){
+  const b=$("cmpBtn"), h=Math.round(radarHeading()), pt=COMPASS[Math.round(radarHeading()/45)%8];
+  b.className="cmp"+(cmpMode==="live"?" live":cmpMode==="locked"?" locked":"");
+  if(cmpMode==="off"){ $("cmpIcon").textContent="N↑"; $("cmpText").textContent="North up"; }
+  else if(cmpMode==="live"){ $("cmpIcon").textContent="◎";
+    $("cmpText").textContent = liveHeading==null ? "Point the iPad…" : `Facing ${h}° ${pt}`; }
+  else { $("cmpIcon").textContent="■"; $("cmpText").textContent=`Locked ${h}° ${pt}`; }
+}
+let cmpMsgT;
+function cmpMessage(s){ $("cmpText").textContent=s; clearTimeout(cmpMsgT); cmpMsgT=setTimeout(syncCmp,3500); }
+$("cmpBtn").onclick=e=>{
+  e.stopPropagation();
+  if(cmpMode==="off"){
+    startSensor().then(ok=>{
+      if(!ok){ cmpMessage("Compass not available"); return; }
+      cmpMode="live"; store.set("cmpMode",cmpMode); syncCmp();
+      setTimeout(()=>{ if(cmpMode==="live"&&liveHeading==null) cmpMessage("No compass reading"); },3000);
+    });
+  } else if(cmpMode==="live"){
+    lockedHeading=Math.round(liveHeading??0); store.set("cmpLock",lockedHeading);
+    cmpMode="locked"; store.set("cmpMode",cmpMode); syncCmp();
+  } else { cmpMode="off"; store.set("cmpMode",cmpMode); syncCmp(); }
+};
+// live mode needs a fresh permission tap after a reload on iOS
+if(cmpMode==="live"){ cmpMode="off"; }
+
+/* where to look for an aircraft: direction and how high */
+function lookText(p,f){
+  const elev = f.alt!=null ? Math.round(Math.atan2(f.alt*0.3048, Math.max(p.d,0.05)*1000)*180/Math.PI) : null;
+  let dir;
+  if(cmpMode!=="off"){
+    const rel=((p.b-radarHeading())%360+360)%360;
+    dir = rel<25||rel>335 ? "ahead" : rel<65 ? "ahead-right" : rel<115 ? "right" : rel<155 ? "behind-right"
+        : rel<205 ? "behind" : rel<245 ? "behind-left" : rel<295 ? "left" : "ahead-left";
+  } else dir = "to the "+["north","north-east","east","south-east","south","south-west","west","north-west"][Math.round(p.b/45)%8];
+  return elev==null ? `Look ${dir}` : `Look ${dir}, ${elev}° up`;
+}
+
 let view=store.get("view","wall");
 function setView(v){
   view=v; store.set("view",v);
@@ -885,7 +983,7 @@ addEventListener("pointerdown",wake,{once:true});
    Boot
    ========================================================= */
 addEventListener("resize",()=>{clearTimeout(window._rz);window._rz=setTimeout(()=>{resize();if(view==="radar")sizeRadar();},120);});
-syncControls();buildSheet();updateStatus();setView(view);
+syncControls();buildSheet();updateStatus();setView(view);syncCmp();
 resize();redraw(true);
 refresh();
 setInterval(refresh,REFRESH_MS);
