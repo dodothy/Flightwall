@@ -43,6 +43,12 @@
   .wall canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
   #glow{filter:blur(var(--glow,6px)) saturate(1.3);opacity:.85;mix-blend-mode:screen}
   #lit{mix-blend-mode:screen}
+  #radar{display:none;cursor:pointer}
+  .wall.radar #radar{display:block}
+  .wall.radar #bg,.wall.radar #glow,.wall.radar #lit{display:none}
+  .seg{display:inline-flex;background:#111114;border:1px solid var(--ui-line);border-radius:999px;padding:3px}
+  .seg .btn{border:0;background:none;padding:6px 14px;color:var(--ui)}
+  .seg .btn.on{background:#fff;color:#000}
 
   /* ---------- status + controls ---------- */
   .bar{
@@ -100,11 +106,15 @@
     <canvas id="bg"></canvas>
     <canvas id="glow"></canvas>
     <canvas id="lit"></canvas>
+    <canvas id="radar"></canvas>
   </div>
 </div>
 
 <div class="bar" id="bar">
   <div class="status" id="status"><i></i><span id="statusText">Starting up</span></div>
+  <div class="seg" role="group" aria-label="View">
+    <button class="btn" data-view="wall">Wall</button><button class="btn" data-view="radar">Radar</button>
+  </div>
   <button class="btn" id="locBtn">◎ <b id="locName">Sydney</b></button>
   <button class="btn" id="colBtn"><span class="swatch" id="colSw"></span><span id="colName">White</span></button>
   <button class="btn" id="unitBtn">Speed <b id="unitName">km/h</b></button>
@@ -574,6 +584,7 @@ async function refresh(){
   try{
     const list=await fetchLive();
     flights=list; mode=list.length?"live":"empty"; lastUpdate=new Date();
+    recordTrails(list);
     fetchRoutes(list).then(()=>{ if(current()) redraw(true); });
   }catch(e){
     if(mode!=="live"){ flights=demoFlights(); mode="demo"; }
@@ -608,6 +619,174 @@ function next(){
 cycleT=setTimeout(next,CYCLE_MS);
 
 /* =========================================================
+   Radar view
+   Your spot in the centre, range rings, a rotating sweep.
+   Blips move smoothly between data refreshes (dead reckoning),
+   point along their track, and glow as the sweep passes.
+   Right panel: the selected flight (same one as the wall).
+   ========================================================= */
+const cR=$("radar"), xR=cR.getContext("2d");
+const RG=[61,220,132], SEL=[255,176,33];
+const trails={};             // hex -> [[lat,lon],...]
+let blipHits=[], radarRAF=0;
+const logoCanv={};
+
+function recordTrails(list){
+  const seen=new Set();
+  list.forEach(f=>{ seen.add(f.hex); (trails[f.hex]=trails[f.hex]||[]).push([f.lat,f.lon]); if(trails[f.hex].length>8) trails[f.hex].shift(); });
+  Object.keys(trails).forEach(h=>{ if(!seen.has(h)) delete trails[h]; });
+}
+function bearing(a,b,c,d){
+  const y=Math.sin(toRad(d-b))*Math.cos(toRad(c));
+  const x=Math.cos(toRad(a))*Math.sin(toRad(c))-Math.sin(toRad(a))*Math.cos(toRad(c))*Math.cos(toRad(d-b));
+  return (Math.atan2(y,x)*180/Math.PI+360)%360;
+}
+const COMPASS=["N","NE","E","SE","S","SW","W","NW"];
+// where the aircraft is now, projected forward from its last report
+function nowPos(f){
+  let lat=f.lat, lon=f.lon;
+  if(mode==="live" && lastUpdate && f.gs && f.track!=null){
+    const hrs=Math.max(0,Math.min((Date.now()-lastUpdate.getTime())/3.6e6, 45/3600));
+    const dR=f.gs*1.852*hrs/6371, th=toRad(f.track), p1=toRad(lat), l1=toRad(lon);
+    const p2=Math.asin(Math.sin(p1)*Math.cos(dR)+Math.cos(p1)*Math.sin(dR)*Math.cos(th));
+    const l2=l1+Math.atan2(Math.sin(th)*Math.sin(dR)*Math.cos(p1),Math.cos(dR)-Math.sin(p1)*Math.sin(p2));
+    lat=p2*180/Math.PI; lon=l2*180/Math.PI;
+  }
+  return {lat,lon,d:dist(loc.lat,loc.lon,lat,lon),b:bearing(loc.lat,loc.lon,lat,lon)};
+}
+function sizeRadar(){
+  const r=$("wall").getBoundingClientRect(), dpr=Math.min(window.devicePixelRatio||1,2);
+  cR.width=Math.round(r.width*dpr); cR.height=Math.round(r.height*dpr);
+}
+const rgba=(c,a)=>`rgba(${c[0]},${c[1]},${c[2]},${a})`;
+function logoCanvas(icao){
+  const e=icao&&logoCache[icao];
+  if(!e||e.state!=="ok") { if(icao) loadLogo(icao); return null; }
+  if(logoCanv[icao]) return logoCanv[icao];
+  const c=document.createElement("canvas");c.width=LOGO;c.height=LOGO;
+  const id=new ImageData(new Uint8ClampedArray(e.px),LOGO,LOGO);c.getContext("2d").putImageData(id,0,0);
+  return logoCanv[icao]=c;
+}
+
+function drawRadar(now){
+  const W=cR.width,H=cR.height; if(!W) return;
+  const u=H/100;                                 // layout unit
+  const cx=H/2, cy=H/2, R=H*0.44;
+  const sweep=(now/4000*360)%360;
+  xR.setTransform(1,0,0,1,0,0);
+  xR.fillStyle="#040605";xR.fillRect(0,0,W,H);
+
+  // scope
+  const g=xR.createRadialGradient(cx,cy,0,cx,cy,R);
+  g.addColorStop(0,"rgba(61,220,132,.07)");g.addColorStop(1,"rgba(61,220,132,.015)");
+  xR.fillStyle=g;xR.beginPath();xR.arc(cx,cy,R,0,6.283);xR.fill();
+  xR.strokeStyle=rgba(RG,.22);xR.lineWidth=Math.max(1,u*.18);
+  for(let i=1;i<=3;i++){xR.beginPath();xR.arc(cx,cy,R*i/3,0,6.283);xR.stroke();}
+  xR.beginPath();xR.moveTo(cx-R,cy);xR.lineTo(cx+R,cy);xR.moveTo(cx,cy-R);xR.lineTo(cx,cy+R);xR.stroke();
+  // ticks every 10 degrees
+  for(let a=0;a<360;a+=10){const r1=R*(a%30?0.975:0.95),t=toRad(a-90);
+    xR.beginPath();xR.moveTo(cx+Math.cos(t)*r1,cy+Math.sin(t)*r1);xR.lineTo(cx+Math.cos(t)*R,cy+Math.sin(t)*R);xR.stroke();}
+  xR.font=`600 ${u*3}px ui-monospace,Menlo,monospace`;xR.textAlign="center";xR.textBaseline="middle";
+  xR.fillStyle=rgba(RG,.7);
+  [["N",0],["E",90],["S",180],["W",270]].forEach(([s,a])=>{const t=toRad(a-90);xR.fillText(s,cx+Math.cos(t)*(R+u*3.2),cy+Math.sin(t)*(R+u*3.2));});
+  xR.textAlign="left";xR.fillStyle=rgba(RG,.45);xR.font=`500 ${u*2.4}px ui-monospace,Menlo,monospace`;
+  for(let i=1;i<=3;i++) xR.fillText(Math.round(rangeKm*i/3)+"km",cx+u*.8,cy-R*i/3+u*1.8);
+
+  // sweep wedge
+  if(xR.createConicGradient){
+    const cg=xR.createConicGradient(toRad(sweep-90-60),cx,cy);
+    cg.addColorStop(0,"rgba(61,220,132,0)");cg.addColorStop(60/360,"rgba(61,220,132,.28)");cg.addColorStop(60/360+.001,"rgba(61,220,132,0)");
+    xR.fillStyle=cg;xR.beginPath();xR.arc(cx,cy,R,0,6.283);xR.fill();
+  }
+  const st=toRad(sweep-90);
+  xR.strokeStyle=rgba(RG,.8);xR.lineWidth=u*.3;xR.beginPath();xR.moveTo(cx,cy);xR.lineTo(cx+Math.cos(st)*R,cy+Math.sin(st)*R);xR.stroke();
+
+  // blips
+  blipHits=[];
+  const toXY=(d,b)=>{const r=Math.min(d/rangeKm,1.04)*R,t=toRad(b-90);return [cx+Math.cos(t)*r,cy+Math.sin(t)*r];};
+  flights.forEach(f=>{
+    const p=nowPos(f); if(p.d>rangeKm*1.05) return;
+    const [x,y]=toXY(p.d,p.b), sel=f.hex===curHex, col=sel?SEL:RG;
+    const since=((sweep-p.b)%360+360)%360, glow=0.35+0.65*Math.max(0,1-since/300);
+    // trail
+    const tr=trails[f.hex]||[];
+    tr.forEach((q,i)=>{const [tx,ty]=toXY(dist(loc.lat,loc.lon,q[0],q[1]),bearing(loc.lat,loc.lon,q[0],q[1]));
+      xR.fillStyle=rgba(col,.12+.25*i/tr.length);xR.beginPath();xR.arc(tx,ty,u*.45,0,6.283);xR.fill();});
+    // plane arrow along track
+    xR.save();xR.translate(x,y);xR.rotate(toRad(f.track||0));
+    xR.shadowColor=rgba(col,1);xR.shadowBlur=u*2*glow;xR.fillStyle=rgba(col,glow);
+    const s=u*(sel?1.9:1.4);
+    xR.beginPath();xR.moveTo(0,-s*1.4);xR.lineTo(s,s);xR.lineTo(0,s*.45);xR.lineTo(-s,s);xR.closePath();xR.fill();
+    xR.restore();xR.shadowBlur=0;
+    if(sel){xR.strokeStyle=rgba(SEL,.9);xR.lineWidth=u*.25;xR.beginPath();xR.arc(x,y,u*3.4,0,6.283);xR.stroke();}
+    // label
+    xR.font=`${sel?700:500} ${u*(sel?2.8:2.3)}px ui-monospace,Menlo,monospace`;xR.textAlign="left";
+    xR.fillStyle=sel?rgba(SEL,1):rgba([220,255,230],.55+.4*glow);
+    const lx=x+u*(sel?4.4:2.6);
+    xR.fillText(f.cs||f.reg||"",lx,y-u*1.2);
+    if(sel){xR.font=`500 ${u*2.3}px ui-monospace,Menlo,monospace`;xR.fillStyle=rgba(SEL,.8);xR.fillText(fmtAlt(f.alt),lx,y+u*2);}
+    blipHits.push({hex:f.hex,x,y});
+  });
+  // you
+  xR.fillStyle="#fff";xR.beginPath();xR.arc(cx,cy,u*.8,0,6.283);xR.fill();
+
+  // ---------- side panel ----------
+  const px0=H*1.0+u*2, pw=W-px0-u*4;
+  xR.strokeStyle="rgba(255,255,255,.07)";xR.lineWidth=1;xR.beginPath();xR.moveTo(H,u*6);xR.lineTo(H,H-u*6);xR.stroke();
+  const f=current()||flights[0];
+  xR.textAlign="left";xR.textBaseline="alphabetic";
+  const label=(s,y)=>{xR.font=`500 ${u*2.3}px ui-monospace,Menlo,monospace`;xR.fillStyle=rgba(RG,.6);xR.fillText(s.toUpperCase(),px0,y);};
+  if(!f){
+    xR.font=`600 ${u*4}px ui-monospace,Menlo,monospace`;xR.fillStyle="#ddd";
+    xR.fillText(mode==="loading"?"Scanning…":"No aircraft",px0,H*.45);
+    xR.font=`500 ${u*2.6}px ui-monospace,Menlo,monospace`;xR.fillStyle="#777";
+    xR.fillText(mode==="loading"?"":`within ${rangeKm} km of ${loc.name}`,px0,H*.45+u*5);
+    return;
+  }
+  const p=nowPos(f), rt=routeCache[f.cs];
+  const lc=logoCanvas(f.airlineIcao), ls=u*14;
+  let y=u*9;
+  if(lc){xR.imageSmoothingEnabled=false;xR.drawImage(lc,px0,y,ls,ls);}
+  else{xR.strokeStyle="rgba(255,255,255,.2)";xR.strokeRect(px0,y,ls,ls);xR.font=`700 ${u*3}px ui-monospace,Menlo,monospace`;xR.fillStyle="#bbb";xR.textAlign="center";xR.fillText(f.badge,px0+ls/2,y+ls/2+u);xR.textAlign="left";}
+  const tx=px0+ls+u*3;
+  xR.font=`700 ${u*5}px ui-monospace,Menlo,monospace`;xR.fillStyle="#fff";xR.fillText(f.airline,tx,y+u*5.5);
+  xR.font=`600 ${u*3.4}px ui-monospace,Menlo,monospace`;xR.fillStyle=rgba(SEL,1);xR.fillText(f.cs||f.reg,tx,y+u*10);
+  xR.font=`500 ${u*2.8}px ui-monospace,Menlo,monospace`;xR.fillStyle="#9aa";xR.fillText(f.typeName||"",tx,y+u*14);
+  y+=ls+u*8;
+  if(rt){xR.font=`700 ${u*7}px ui-monospace,Menlo,monospace`;xR.fillStyle="#fff";xR.fillText(`${rt.from} → ${rt.to}`,px0,y);y+=u*8;}
+  const stats=[["Altitude",fmtAlt(f.alt)],["Speed",fmtSpd(f.gs)],["Distance",p.d.toFixed(1)+"km "+COMPASS[Math.round(p.b/45)%8]],["Heading",(f.track!=null?Math.round(f.track):"--")+"°"]];
+  const cw=pw/2;
+  stats.forEach((s,i)=>{const sx=px0+(i%2)*cw, sy=y+Math.floor(i/2)*u*11;
+    xR.font=`500 ${u*2.3}px ui-monospace,Menlo,monospace`;xR.fillStyle=rgba(RG,.6);xR.fillText(s[0].toUpperCase(),sx,sy);
+    xR.font=`600 ${u*4.4}px ui-monospace,Menlo,monospace`;xR.fillStyle="#eee";xR.fillText(s[1],sx,sy+u*5.5);});
+  y+=u*24;
+  // other aircraft
+  label(`${flights.length} in range · tap a blip`,y);
+  xR.font=`500 ${u*2.6}px ui-monospace,Menlo,monospace`;
+  flights.filter(o=>o.hex!==f.hex).slice(0,4).forEach((o,i)=>{
+    const q=nowPos(o);xR.fillStyle="#8a9";
+    xR.fillText(`${(o.cs||o.reg).padEnd(8)} ${q.d.toFixed(0).padStart(3)}km ${fmtAlt(o.alt)}`,px0,y+u*4.2*(i+1));
+  });
+}
+function radarLoop(now){
+  radarRAF=0;
+  if(view!=="radar"||document.hidden) return;
+  drawRadar(now);
+  radarRAF=requestAnimationFrame(radarLoop);
+}
+let view=store.get("view","wall");
+function setView(v){
+  view=v; store.set("view",v);
+  $("wall").classList.toggle("radar",v==="radar");
+  $("wall").setAttribute("aria-label", v==="radar"?"Radar of aircraft around you":"LED flight display");
+  document.querySelectorAll(".seg .btn").forEach(b=>b.classList.toggle("on",b.dataset.view===v));
+  if(v==="radar"){ sizeRadar(); if(!radarRAF) radarRAF=requestAnimationFrame(radarLoop); }
+  else { resize(); }
+}
+document.querySelectorAll(".seg .btn").forEach(b=>b.onclick=()=>setView(b.dataset.view));
+document.addEventListener("visibilitychange",()=>{ if(!document.hidden&&view==="radar"&&!radarRAF) radarRAF=requestAnimationFrame(radarLoop); });
+
+/* =========================================================
    Status + controls
    ========================================================= */
 function updateStatus(){
@@ -617,7 +796,8 @@ function updateStatus(){
   else if(mode==="loading") t.textContent="Connecting to live ADS-B";
   else {
     const hh=lastUpdate.toLocaleTimeString("en-AU",{hour:"numeric",minute:"2-digit",second:"2-digit"});
-    t.textContent=`Live · ${flights.length} aircraft within ${rangeKm} km · ${sourceName} · ${hh}`;
+    t.textContent=`Live · ${flights.length} aircraft · ${rangeKm} km · ${hh}`;
+    t.title=sourceName;
   }
 }
 function applyDim(){
@@ -679,7 +859,16 @@ $("geoBtn").onclick=()=>{
 };
 
 /* tap the wall to skip; controls fade when idle */
-$("wall").onclick=()=>{next();wake();};
+$("wall").onclick=e=>{
+  wake();
+  if(view==="radar"){
+    const r=cR.getBoundingClientRect(), k=cR.width/r.width, x=(e.clientX-r.left)*k, y=(e.clientY-r.top)*k;
+    let best=null,bd=(cR.height*0.08)**2;
+    blipHits.forEach(h=>{const d=(h.x-x)**2+(h.y-y)**2; if(d<bd){bd=d;best=h;}});
+    if(best){ curHex=best.hex; clearTimeout(cycleT); cycleT=setTimeout(next,CYCLE_MS*2); redraw(true); return; }
+  }
+  next();
+};
 let idleT;
 function poke(){document.body.classList.remove("idle");clearTimeout(idleT);idleT=setTimeout(()=>{if(!$("sheet").classList.contains("on"))document.body.classList.add("idle");},6000);}
 ["pointerdown","keydown"].forEach(ev=>addEventListener(ev,poke));
@@ -695,8 +884,8 @@ addEventListener("pointerdown",wake,{once:true});
 /* =========================================================
    Boot
    ========================================================= */
-addEventListener("resize",()=>{clearTimeout(window._rz);window._rz=setTimeout(resize,120);});
-syncControls();buildSheet();updateStatus();
+addEventListener("resize",()=>{clearTimeout(window._rz);window._rz=setTimeout(()=>{resize();if(view==="radar")sizeRadar();},120);});
+syncControls();buildSheet();updateStatus();setView(view);
 resize();redraw(true);
 refresh();
 setInterval(refresh,REFRESH_MS);
