@@ -87,6 +87,9 @@
   .row{display:flex;gap:8px}
   .row .btn{flex:1;justify-content:center;border-radius:10px}
   .lbl{color:var(--ui);margin-top:6px}
+  .field{width:100%;margin:8px 0 6px;padding:12px;border-radius:10px;border:1px solid var(--ui-line);background:#000;color:#fff;font:inherit;font-size:16px}
+  .field:focus{outline:2px solid #fff;outline-offset:1px}
+  .diag{color:var(--ui-dim);font-size:11px;line-height:1.5;margin-bottom:12px;max-height:84px;overflow:auto;white-space:pre-line}
 </style>
 </head>
 <body>
@@ -116,6 +119,9 @@
     <div class="grid" id="cityGrid"></div>
     <div class="lbl">Range</div>
     <div class="row" id="rangeRow" style="margin:8px 0 14px"></div>
+    <div class="lbl">Live data relay (only if the status says Demo)</div>
+    <input id="relayIn" class="field" type="url" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="https://flightwall-relay.yourname.workers.dev">
+    <div class="diag" id="diag"></div>
     <button class="btn wide" id="sheetClose">Done</button>
   </div>
 </div>
@@ -410,16 +416,33 @@ function wipe(now,my){
 }
 
 /* =========================================================
-   Data: live ADS-B (adsb.lol, then airplanes.live)
+   Data: live ADS-B
+   The flight networks don't let other websites read them
+   directly (no CORS), so requests can go through a relay.
+   Order: direct, your own relay (if set), public relays.
+   The first path that works is remembered.
    ========================================================= */
-async function getJSON(url,opts={}){
-  const ctl=new AbortController();const t=setTimeout(()=>ctl.abort(),10000);
+let relayUrl = store.get("relay","");
+try{ const q=new URLSearchParams(location.search).get("relay"); if(q){ relayUrl=q; store.set("relay",q); } }catch(e){}
+function paths(){
+  const list=[{name:"direct",wrap:u=>u}];
+  if(relayUrl) list.push({name:"your relay",wrap:u=>relayUrl.replace(/\/?$/,"/")+"?url="+encodeURIComponent(u),post:true});
+  list.push(
+    {name:"allorigins",wrap:u=>"https://api.allorigins.win/raw?url="+encodeURIComponent(u+(u.includes("?")?"&":"?")+"_="+Date.now())},
+    {name:"codetabs",wrap:u=>"https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(u)},
+    {name:"corsproxy",wrap:u=>"https://corsproxy.io/?url="+encodeURIComponent(u),post:true},
+  );
+  return list;
+}
+async function getJSON(url,opts={},ms=8000){
+  const ctl=new AbortController();const t=setTimeout(()=>ctl.abort(),ms);
   try{
-    const r=await fetch(url,{...opts,signal:ctl.signal});
+    const r=await fetch(url,{cache:"no-store",...opts,signal:ctl.signal});
     if(!r.ok) throw new Error("HTTP "+r.status);
     return await r.json();
   }finally{clearTimeout(t);}
 }
+let lastErrors=[];
 function dist(a,b,c,d){
   const R=6371,dLat=toRad(c-a),dLon=toRad(d-b);
   const x=Math.sin(dLat/2)**2+Math.cos(toRad(a))*Math.cos(toRad(c))*Math.sin(dLon/2)**2;
@@ -453,42 +476,65 @@ function normalise(a){
   };
 }
 
-async function fetchLive(){
+let bestPath = store.get("path", null);   // {src, via}
+let failStreak = 0;
+function feedUrls(){
   const nm=Math.max(1,Math.round(rangeKm/1.852));
-  const sources=[
-    ["adsb.lol",`https://api.adsb.lol/v2/lat/${loc.lat}/lon/${loc.lon}/dist/${nm}`],
-    ["airplanes.live",`https://api.airplanes.live/v2/point/${loc.lat}/${loc.lon}/${nm}`],
-  ];
-  let lastErr;
-  for(const [name,url] of sources){
-    try{
-      const j=await getJSON(url);
-      sourceName=name;
-      return (j.ac||j.aircraft||[])
-        .filter(a=>a.lat!=null&&a.lon!=null&&a.alt_baro!=="ground"&&(a.flight||a.r))
-        .map(normalise)
-        .filter(f=>f.dist<=rangeKm*1.05)
-        .sort((x,y)=>x.dist-y.dist);
-    }catch(e){lastErr=e;}
-  }
-  throw lastErr;
+  return {
+    "adsb.lol":`https://api.adsb.lol/v2/lat/${loc.lat}/lon/${loc.lon}/dist/${nm}`,
+    "airplanes.live":`https://api.airplanes.live/v2/point/${loc.lat}/${loc.lon}/${nm}`,
+    "adsb.fi":`https://opendata.adsb.fi/api/v2/lat/${loc.lat}/lon/${loc.lon}/dist/${nm}`,
+  };
 }
+function parseFeed(j){
+  const ac=j&&(j.ac||j.aircraft);
+  if(!Array.isArray(ac)) throw new Error("unexpected reply");
+  return ac.filter(a=>a.lat!=null&&a.lon!=null&&a.alt_baro!=="ground"&&(a.flight||a.r))
+    .map(normalise).filter(f=>f.dist<=rangeKm*1.05).sort((x,y)=>x.dist-y.dist);
+}
+async function fetchLive(){
+  const urls=feedUrls(), P=paths();
+  // fast path: the combination that worked last time
+  if(bestPath){
+    const via=P.find(p=>p.name===bestPath.via);
+    if(via&&urls[bestPath.src]){
+      try{ const list=parseFeed(await getJSON(via.wrap(urls[bestPath.src])));
+        sourceName=bestPath.src+(via.name==="direct"?"":" via "+via.name); failStreak=0; return list;
+      }catch(e){ if(++failStreak<2) throw e; }
+    }
+  }
+  // discovery: try every combination at once, keep the first that answers
+  lastErrors=[];
+  const tries=[];
+  for(const src of Object.keys(urls)) for(const via of P){
+    tries.push(getJSON(via.wrap(urls[src]),{},12000).then(j=>({src,via:via.name,list:parseFeed(j)}))
+      .catch(e=>{lastErrors.push(`${src} ${via.name}: ${e.name==="AbortError"?"timed out":(e.message||"blocked")}`);throw e;}));
+  }
+  const win=await Promise.any(tries);
+  bestPath={src:win.src,via:win.via}; store.set("path",bestPath); failStreak=0;
+  sourceName=win.src+(win.via==="direct"?"":" via "+win.via);
+  return win.list;
+}
+
+/* routes: adsbdb.com (free, per callsign), cached */
 async function fetchRoutes(list){
-  const need=list.filter(f=>/^[A-Z]{3}\d/.test(f.cs)&&!(f.cs in routeCache)).slice(0,20);
+  const need=list.filter(f=>/^[A-Z]{3}\d/.test(f.cs)&&!(f.cs in routeCache)).slice(0,6);
   if(!need.length) return;
-  need.forEach(f=>routeCache[f.cs]=null);
-  try{
-    const j=await getJSON("https://api.adsb.lol/api/0/routeset",{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({planes:need.map(f=>({callsign:f.cs,lat:f.lat,lng:f.lon}))}),
-    });
-    (Array.isArray(j)?j:[]).forEach(r=>{
-      const codes=r._airport_codes_iata||"";
-      const parts=codes.split("-").filter(Boolean);
-      if(r.callsign&&parts.length>=2&&r.plausible!==false)
-        routeCache[r.callsign.toUpperCase()]={from:parts[0],to:parts[parts.length-1]};
-    });
-  }catch(e){}
+  const P=paths().filter(p=>p.name==="direct"||p.name===bestPath?.via||p.name==="your relay");
+  await Promise.all(need.map(async f=>{
+    routeCache[f.cs]=null;
+    const u=`https://api.adsbdb.com/v0/callsign/${encodeURIComponent(f.cs)}`;
+    for(const via of P){
+      try{
+        const j=await getJSON(via.wrap(u),{},7000);
+        const r=j&&j.response&&j.response.flightroute;
+        if(r&&r.origin&&r.destination){
+          routeCache[f.cs]={from:r.origin.iata_code||r.origin.icao_code,to:r.destination.iata_code||r.destination.icao_code};
+        }
+        return;
+      }catch(e){}
+    }
+  }));
 }
 
 function demoFlights(){
@@ -505,14 +551,20 @@ function demoFlights(){
   return D.map((d,i)=>normalise({...d,hex:"demo"+i,lat:loc.lat+d.dLat,lon:loc.lon+d.dLon})).sort((x,y)=>x.dist-y.dist);
 }
 
+let busy=false, lastDiscovery=0;
 async function refresh(){
+  if(busy) return;
+  // while stuck on demo, look for a working path once a minute, not every refresh
+  if(mode==="demo" && !bestPath && Date.now()-lastDiscovery<60000) return;
+  if(!bestPath) lastDiscovery=Date.now();
+  busy=true;
   try{
     const list=await fetchLive();
     flights=list; mode=list.length?"live":"empty"; lastUpdate=new Date();
     fetchRoutes(list).then(()=>{ if(current()) redraw(true); });
   }catch(e){
-    flights=demoFlights(); mode="demo";
-  }
+    if(mode!=="live"){ flights=demoFlights(); mode="demo"; }
+  }finally{ busy=false; }
   updateStatus();
   if(!current()) curHex = flights[0]?.hex || null;
   redraw();
@@ -548,7 +600,7 @@ cycleT=setTimeout(next,CYCLE_MS);
 function updateStatus(){
   const s=$("status"), t=$("statusText");
   s.className="status "+(mode==="live"||mode==="empty"?"live":mode==="demo"?"demo":"");
-  if(mode==="demo") t.textContent="Demo data · live feed unreachable from this browser";
+  if(mode==="demo") t.textContent="Demo data · live feed blocked · tap ◎ to add a relay";
   else if(mode==="loading") t.textContent="Connecting to live ADS-B";
   else {
     const hh=lastUpdate.toLocaleTimeString("en-AU",{hour:"numeric",minute:"2-digit",second:"2-digit"});
@@ -571,8 +623,16 @@ function syncControls(){
 $("colBtn").onclick=()=>{colI=(colI+1)%COLOURS.length;store.set("col",colI);syncControls();redraw(true);};
 $("unitBtn").onclick=()=>{unitI=(unitI+1)%UNITS.length;store.set("unit",unitI);syncControls();redraw(true);};
 $("dimBtn").onclick=()=>{dimI=(dimI+1)%DIMS.length;store.set("dim",dimI);applyDim();};
-$("locBtn").onclick=()=>{$("sheet").classList.add("on");};
-$("sheetClose").onclick=()=>$("sheet").classList.remove("on");
+$("locBtn").onclick=()=>{
+  $("relayIn").value=relayUrl;
+  $("diag").textContent = mode==="demo" && lastErrors.length ? "Last check:\n"+lastErrors.slice(0,8).join("\n") : (mode==="live"?"Connected: "+sourceName:"");
+  $("sheet").classList.add("on");
+};
+$("sheetClose").onclick=()=>{
+  const v=$("relayIn").value.trim();
+  $("sheet").classList.remove("on");
+  if(v!==relayUrl){ relayUrl=v; store.set("relay",v); bestPath=null; store.set("path",null); restart(); }
+};
 $("sheet").onclick=e=>{if(e.target===$("sheet"))$("sheet").classList.remove("on");};
 
 function buildSheet(){
