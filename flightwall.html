@@ -426,6 +426,9 @@ let relayUrl = store.get("relay","");
 try{ const q=new URLSearchParams(location.search).get("relay"); if(q){ relayUrl=q; store.set("relay",q); } }catch(e){}
 function paths(){
   const list=[{name:"direct",wrap:u=>u}];
+  // when hosted with its own relay (e.g. Vercel), use it: same address, no CORS issue
+  if(/^https?:$/.test(location.protocol) && !/github\.io$/.test(location.hostname))
+    list.push({name:"built-in relay",wrap:u=>location.origin+"/api/relay?url="+encodeURIComponent(u),post:true});
   if(relayUrl) list.push({name:"your relay",wrap:u=>relayUrl.replace(/\/?$/,"/")+"?url="+encodeURIComponent(u),post:true});
   list.push(
     {name:"allorigins",wrap:u=>"https://api.allorigins.win/raw?url="+encodeURIComponent(u+(u.includes("?")?"&":"?")+"_="+Date.now())},
